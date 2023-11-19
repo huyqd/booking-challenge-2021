@@ -8,41 +8,35 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from metaflow import FlowSpec, step
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-from metaflow import FlowSpec, step
+from tqdm.contrib.logging import tqdm_logging_redirect
 
 
 def train_epoch(loader, model, optimizer, scheduler, device):
     model.train()
     model.zero_grad()
     train_loss = []
-    bar = tqdm(range(len(loader)))
-    load_iter = iter(loader)
-    batch = next(load_iter)
-    batch = {k: batch[k].to(device, non_blocking=True) for k in batch.keys()}
 
-    for i in bar:
-        old_batch = batch
-        if i + 1 < len(loader):
-            batch = next(load_iter)
+    with tqdm_logging_redirect():
+        for batch in (bar := tqdm(loader)):
+            # for batch in tqdm(loader):
             batch = {k: batch[k].to(device, non_blocking=True) for k in batch.keys()}
+            out_dict = model(batch)
+            loss = out_dict["loss"]
+            loss_np = loss.detach().cpu().numpy()
 
-        out_dict = model(old_batch)
-        logits = out_dict["logits"]
-        loss = out_dict["loss"]
-        loss_np = loss.detach().cpu().numpy()
+            loss.backward()
 
-        loss.backward()
+            optimizer.step()
+            scheduler.step()
+            for p in model.parameters():
+                p.grad = None
 
-        optimizer.step()
-        scheduler.step()
-        for p in model.parameters():
-            p.grad = None
-
-        train_loss.append(loss_np)
-        smooth_loss = sum(train_loss[-100:]) / min(len(train_loss), 100)
-        bar.set_description("loss: %.5f, smth: %.5f" % (loss_np, smooth_loss))
+            train_loss.append(loss_np)
+            smooth_loss = sum(train_loss[-100:]) / min(len(train_loss), 100)
+            bar.set_description("loss: %.5f, smth: %.5f" % (loss_np, smooth_loss))
     return train_loss
 
 
@@ -70,28 +64,22 @@ def val_epoch(loader, model, device):
     TARGETS = []
 
     with torch.no_grad():
-        bar = tqdm(range(len(loader)))
-        load_iter = iter(loader)
-        batch = next(load_iter)
-        batch = {k: batch[k].to(device, non_blocking=True) for k in batch.keys()}
-
-        for i in bar:
-            old_batch = batch
-            if i + 1 < len(loader):
-                batch = next(load_iter)
+        with tqdm_logging_redirect():
+            for batch in (bar := tqdm(loader)):
+                # for batch in tqdm(loader):
                 batch = {k: batch[k].to(device, non_blocking=True) for k in batch.keys()}
 
-            out_dict = model(old_batch)
-            logits = out_dict["logits"]
-            loss = out_dict["loss"]
-            loss_np = loss.detach().cpu().numpy()
-            target = old_batch["target"]
-            LOGITS.append(logits.detach())
-            TARGETS.append(target.detach())
-            val_loss.append(loss_np)
+                out_dict = model(batch)
+                logits = out_dict["logits"]
+                loss = out_dict["loss"]
+                loss_np = loss.detach().cpu().numpy()
+                target = batch["target"]
+                LOGITS.append(logits.detach())
+                TARGETS.append(target.detach())
+                val_loss.append(loss_np)
 
-            smooth_loss = sum(val_loss[-100:]) / min(len(val_loss), 100)
-            bar.set_description("loss: %.5f, smth: %.5f" % (loss_np, smooth_loss))
+                smooth_loss = sum(val_loss[-100:]) / min(len(val_loss), 100)
+                bar.set_description("loss: %.5f, smth: %.5f" % (loss_np, smooth_loss))
 
         val_loss = np.mean(val_loss)
 
@@ -373,7 +361,6 @@ class MLPTrain(FlowSpec):
 
     @step
     def train(self):
-        checkpoint_path = Path("./checkpoints") / "mlp"
         input_path = Path("../data/")
         fname = "mlp"
 
@@ -424,7 +411,7 @@ class MLPTrain(FlowSpec):
         for i in range(1, LAGS + 1):
             raw[f"city_id_lag{i}"] = raw.groupby("utrip_id_")["city_id_"].shift(i, fill_value=NUM_CITIES)
             lag_cities.append(f"city_id_lag{i}")
-            raw[f"country_lag{i}"] = raw.groupby("utrip_id_")["hotel_country_"].shift(i, fill_value=NUM_CITIES)
+            raw[f"country_lag{i}"] = raw.groupby("utrip_id_")["hotel_country_"].shift(i, fill_value=NUM_HOTELS)
             lag_countries.append(f"country_lag{i}")
         # Extract the first city and country for each trip
         tmpD = raw[raw["dcount"] == 0][["utrip_id", "city_id_"]]
