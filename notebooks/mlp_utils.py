@@ -66,20 +66,11 @@ def val_epoch(loader, model, device):
     return val_loss, LOGITS, TARGETS
 
 
-def get_top4(preds):
-    TOP4 = np.empty((preds.shape[0], 4))
-    for i in range(4):
-        x = np.argmax(preds, axis=1)
-        TOP4[:, i] = x
-        x = np.expand_dims(x, axis=1)
-        np.put_along_axis(preds, x, -1e10, axis=1)
-    return TOP4
-
-
-def top4(preds, target):
-    TOP4 = get_top4(preds)
-    acc = np.max(TOP4 == target, axis=1)
+def topk(preds, target, k=4):
+    topk_ = preds.argsort(axis=1)[:, ::-1][:, :k]
+    acc = np.max(topk_ == target, axis=1)
     acc = np.mean(acc)
+
     return acc
 
 

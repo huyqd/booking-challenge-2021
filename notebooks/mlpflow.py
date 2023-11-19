@@ -9,7 +9,7 @@ import torch
 from metaflow import FlowSpec, step, batch, IncludeFile
 from torch.utils.data import DataLoader
 
-from notebooks.mlp_utils import train_epoch, top4, val_epoch, save_checkpoint, BookingDataset, Net, seed_torch
+from notebooks.mlp_utils import train_epoch, topk, val_epoch, save_checkpoint, BookingDataset, Net, seed_torch
 
 input_path = Path("../data/")
 
@@ -220,7 +220,7 @@ class MLPFlow(FlowSpec):
                 train_loss = train_epoch(train_data_loader, model, optimizer, scheduler, device)
                 val_loss, PREDS, TARGETS = val_epoch(valid_data_loader, model, device)
                 PREDS[:, LOW_CITY] = -1e10  # remove low frequency cities
-                score = top4(PREDS, TARGETS)
+                score = topk(PREDS, TARGETS)
 
                 print(
                     f'Fold {fold} Seed {seed} Ep {epoch} lr {optimizer.param_groups[0]["lr"]:.7f} train loss {np.mean(train_loss):4f} val loss {np.mean(val_loss):4f} score {score:4f}',

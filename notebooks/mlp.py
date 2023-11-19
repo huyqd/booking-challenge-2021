@@ -7,7 +7,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
-from mlp_utils import train_epoch, top4, val_epoch, save_checkpoint, BookingDataset, Net, seed_torch
+from mlp_utils import train_epoch, topk, val_epoch, save_checkpoint, BookingDataset, Net, seed_torch
 
 input_path = Path("../data/")
 
@@ -17,6 +17,7 @@ def load_data():
     LAGS = 5
     # Read CSV using Pandas
     raw = pd.read_csv(input_path / "train_and_test_2.csv")
+    raw = raw.query("utrip_id_ < 10000")
     # Replace 0s in 'city_id' with NaN
     raw.loc[raw["city_id"] == 0, "city_id"] = np.NaN
     # Group by 'city_id' and count 'utrip_id'
@@ -159,7 +160,6 @@ def train(raw, lag_cities, lag_countries, NUM_CITIES, NUM_HOTELS, NUM_DEVICE, LO
         train_data_loader = DataLoader(
             train_dataset,
             batch_size=TRAIN_BATCH_SIZE,
-            num_workers=WORKERS,
             shuffle=True,
             pin_memory=True,
         )
@@ -173,8 +173,7 @@ def train(raw, lag_cities, lag_countries, NUM_CITIES, NUM_HOTELS, NUM_DEVICE, LO
 
         valid_data_loader = DataLoader(
             valid_dataset,
-            batch_size=TRAIN_BATCH_SIZE,
-            num_workers=WORKERS,
+            batch_size=TRAIN_BATCH_SIZE * 2,
             shuffle=False,
             pin_memory=True,
         )
@@ -208,10 +207,17 @@ def train(raw, lag_cities, lag_countries, NUM_CITIES, NUM_HOTELS, NUM_DEVICE, LO
             train_loss = train_epoch(train_data_loader, model, optimizer, scheduler, device)
             val_loss, PREDS, TARGETS = val_epoch(valid_data_loader, model, device)
             PREDS[:, LOW_CITY] = -1e10  # remove low frequency cities
-            score = top4(PREDS, TARGETS)
+            score = topk(PREDS, TARGETS)
 
             print(
-                f'Fold {fold} Seed {seed} Ep {epoch} lr {optimizer.param_groups[0]["lr"]:.7f} train loss {np.mean(train_loss):4f} val loss {np.mean(val_loss):4f} score {score:4f}',
+                f"""
+                Fold {fold} 
+                Seed {seed} 
+                Ep {epoch} 
+                lr {optimizer.param_groups[0]["lr"]:.7f} 
+                train loss {np.mean(train_loss):4f} 
+                val loss {np.mean(val_loss):4f} 
+                score {score:4f}""",
                 flush=True,
             )
             if score > best_score:
