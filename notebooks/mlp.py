@@ -7,7 +7,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
-from notebooks.mlp_utils import train_epoch, top4, val_epoch, save_checkpoint, BookingDataset, Net, seed_torch
+from mlp_utils import train_epoch, top4, val_epoch, save_checkpoint, BookingDataset, Net, seed_torch
 
 input_path = Path("../data/")
 

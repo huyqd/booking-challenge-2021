@@ -6,33 +6,64 @@ from torch import nn as nn
 from torch.nn import functional as F
 from torch.utils.data import Dataset
 from tqdm import tqdm
-from tqdm.contrib.logging import tqdm_logging_redirect
+from tqdm.contrib.logging import tqdm_logging_redirect  # noqa
 
 
 def train_epoch(loader, model, optimizer, scheduler, device):
     model.train()
-    model.zero_grad()
     train_loss = []
 
-    with tqdm_logging_redirect():
+    # with tqdm_logging_redirect():
+    for batch in (bar := tqdm(loader)):
+        optimizer.zero_grad()
+
+        batch = {k: batch[k].to(device, non_blocking=True) for k in batch.keys()}
+        out_dict = model(batch)
+        loss = out_dict["loss"]
+        loss_np = loss.detach().cpu().numpy()
+
+        loss.backward()
+
+        optimizer.step()
+        scheduler.step()
+
+        train_loss.append(loss_np)
+        smooth_loss = sum(train_loss[-100:]) / min(len(train_loss), 100)
+
+        bar.set_description(f"loss: {loss_np:.5f}, smooth loss: {smooth_loss:.5f}")
+
+    return train_loss
+
+
+def val_epoch(loader, model, device):
+    model.eval()
+    val_loss = []
+    LOGITS = []
+    TARGETS = []
+
+    with torch.no_grad():
+        # with tqdm_logging_redirect():
         for batch in (bar := tqdm(loader)):
-            # for batch in tqdm(loader):
             batch = {k: batch[k].to(device, non_blocking=True) for k in batch.keys()}
+
             out_dict = model(batch)
+            logits = out_dict["logits"]
             loss = out_dict["loss"]
             loss_np = loss.detach().cpu().numpy()
+            target = batch["target"]
+            LOGITS.append(logits.detach())
+            TARGETS.append(target.detach())
+            val_loss.append(loss_np)
 
-            loss.backward()
+            smooth_loss = sum(val_loss[-100:]) / min(len(val_loss), 100)
+            bar.set_description(f"loss: {loss_np:.5f}, smooth loss: {smooth_loss:.5f}")
 
-            optimizer.step()
-            scheduler.step()
-            for p in model.parameters():
-                p.grad = None
+        val_loss = np.mean(val_loss)
 
-            train_loss.append(loss_np)
-            smooth_loss = sum(train_loss[-100:]) / min(len(train_loss), 100)
-            bar.set_description("loss: %.5f, smth: %.5f" % (loss_np, smooth_loss))
-    return train_loss
+    LOGITS = torch.cat(LOGITS).cpu().numpy()
+    TARGETS = torch.cat(TARGETS).cpu().numpy()
+
+    return val_loss, LOGITS, TARGETS
 
 
 def get_top4(preds):
@@ -50,38 +81,6 @@ def top4(preds, target):
     acc = np.max(TOP4 == target, axis=1)
     acc = np.mean(acc)
     return acc
-
-
-def val_epoch(loader, model, device):
-    model.eval()
-    val_loss = []
-    LOGITS = []
-    TARGETS = []
-
-    with torch.no_grad():
-        with tqdm_logging_redirect():
-            for batch in (bar := tqdm(loader)):
-                # for batch in tqdm(loader):
-                batch = {k: batch[k].to(device, non_blocking=True) for k in batch.keys()}
-
-                out_dict = model(batch)
-                logits = out_dict["logits"]
-                loss = out_dict["loss"]
-                loss_np = loss.detach().cpu().numpy()
-                target = batch["target"]
-                LOGITS.append(logits.detach())
-                TARGETS.append(target.detach())
-                val_loss.append(loss_np)
-
-                smooth_loss = sum(val_loss[-100:]) / min(len(val_loss), 100)
-                bar.set_description("loss: %.5f, smth: %.5f" % (loss_np, smooth_loss))
-
-        val_loss = np.mean(val_loss)
-
-    LOGITS = torch.cat(LOGITS).cpu().numpy()
-    TARGETS = torch.cat(TARGETS).cpu().numpy()
-
-    return val_loss, LOGITS, TARGETS
 
 
 def save_checkpoint(model, optimizer, scheduler, epoch, best_score, fold, seed, fname):
