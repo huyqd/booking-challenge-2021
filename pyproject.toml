@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "booking-challenge-2021"
+name = "src"
 version = "0.1.0"
 description = ""
 authors = ["Huy Dang <quanghuy.dang210@gmail.com>"]
