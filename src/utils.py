@@ -7,6 +7,7 @@ from torch.nn import functional as F
 from torch.utils.data import Dataset
 from tqdm import tqdm
 from tqdm.contrib.logging import tqdm_logging_redirect  # noqa
+from pathlib import Path
 
 
 def train_epoch(loader, model, optimizer, scheduler, device):
@@ -82,7 +83,10 @@ def save_checkpoint(model, optimizer, scheduler, epoch, best_score, fold, seed, 
         "epoch": epoch,
         "best_score": best_score,
     }
-    torch.save(checkpoint, f"./checkpoints/{fname}/{fname}_{fold}_{seed}.pt")
+    checkpoint_path = Path(f"./checkpoints/{fname}")
+    if not checkpoint_path.exists():
+        checkpoint_path.mkdir(parents=True, exist_ok=True)
+    torch.save(checkpoint, checkpoint_path / f"{fname}_{fold}_{seed}.pt")
 
 
 def load_checkpoint(
@@ -140,8 +144,8 @@ class BookingDataset(Dataset):
         self.lag_countries_ = data[lag_countries].values
         self.first_city = data["first_city"].values
         self.first_country = data["first_country"].values
-        self.booker_country_ = data["booker_country_"].values
-        self.device_class_ = data["device_class_"].values
+        self.booker_country_ = data["booker_country"].values
+        self.device_class_ = data["device_class"].values
         self.lapse = data["lapse"].values
         self.season = data["season"].values
         self.weekend = data["weekend"].values
@@ -337,3 +341,14 @@ def seed_torch(seed_value):
     torch.manual_seed(seed_value)  # cpu  vars
     if torch.backends.mps.is_available():
         torch.mps.manual_seed(seed_value)
+
+
+def get_device():
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+
+    return device

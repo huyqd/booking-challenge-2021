@@ -7,129 +7,165 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
-from mlp_utils import train_epoch, topk, val_epoch, save_checkpoint, BookingDataset, Net, seed_torch
+from src.utils import train_epoch, topk, val_epoch, save_checkpoint, BookingDataset, Net, seed_torch, get_device
 
 input_path = Path("../data/")
 
 
-def load_data():
-    LOW_CITY_THR = 9
+def _city_count_per_trip(data, low_frequency_city_threshold=9):
+    city_count = (
+        data.query("istest == 0 and icount > 0")  # train only and exclude last city
+        .groupby("city_id")["utrip_id"]
+        .count()
+        .rename("city_count")
+        .reset_index()
+    )
+    data = data.merge(city_count, how="left", on="city_id")
+
+    # Replace rare cities with -1
+    data.loc[data["city_count"] <= low_frequency_city_threshold, "city_id"] = -1
+    data = data.sort_values(["utrip_id", "checkin"])
+
+    return data
+
+
+def _encode_categorical(data, categorical_columns):
+    categorical_values = data[categorical_columns].apply(lambda x: x.factorize()[0])
+    low_frequency_city_index = categorical_values.loc[data["city_id"] == -1, "city_id"].unique()
+
+    assert len(low_frequency_city_index) == 1
+
+    data[categorical_columns] = categorical_values
+
+    num_cities = data["city_id"].max() + 1
+    num_hotels = data["hotel_country"].max() + 1
+    num_devices = data["device_class"].max() + 1
+
+    return data, low_frequency_city_index[0], num_cities, num_hotels, num_devices
+
+
+def _add_reverse_training_data(data):
+    data = data.assign(reverse=0)
+    reverse_training_data = data.query("istest == 0").copy()
+    reverse_training_data = reverse_training_data.assign(
+        reverse=1,
+        utrip_id=reverse_training_data["utrip_id"] + "_r",
+    )
+    reverse_training_data[["icount", "dcount"]] = reverse_training_data[["dcount", "icount"]]
+    reverse_training_data = reverse_training_data.sort_values(["utrip_id", "dcount"], ignore_index=True)
+    data = pd.concat([data, reverse_training_data], ignore_index=True)
+
+    data["sorting"] = np.arange(data.shape[0])
+
+    return data
+
+
+def _lag_cities_countries(data, NUM_CITIES, NUM_HOTELS, n_lags=5):
+    lag_cities = data.groupby("utrip_id")["city_id"].shift(range(1, n_lags + 1), fill_value=NUM_CITIES)
+    lag_cities_columns = [f"city_id_lag{i}" for i in range(1, n_lags + 1)]
+    lag_cities.columns = lag_cities_columns
+
+    lag_countries = data.groupby("utrip_id")["hotel_country"].shift(range(1, n_lags + 1), fill_value=NUM_HOTELS)
+    lag_countries_columns = [f"hotel_id_lag{i}" for i in range(1, n_lags + 1)]
+    lag_countries.columns = lag_countries_columns
+
+    data = pd.concat([data, lag_cities, lag_countries], axis=1)
+
+    return data, lag_cities_columns, lag_countries_columns
+
+
+def _find_first_last(data, first_columns=None, last_columns=None, first_names=None, last_names=None):
+    if first_columns is not None:
+        first = data.query("dcount == 0")[["utrip_id"] + first_columns]
+        first.columns = ["utrip_id"] + first_names
+        data = data.merge(first, on="utrip_id", how="left")
+
+    if last_columns is not None:
+        last = data.query("icount == 0")[["utrip_id"] + last_columns]
+        last.columns = ["utrip_id"] + last_names
+        data = data.merge(last, on="utrip_id", how="left")
+
+    return data
+
+
+def load_data(n_trips=None):
     LAGS = 5
-    # Read CSV using Pandas
-    raw = pd.read_csv(input_path / "train_and_test_2.csv")
-    raw = raw.query("utrip_id_ < 10000")
+
+    data = pd.read_csv(input_path / "train_and_test_2.csv")
+    if n_trips:
+        data = data.query("utrip_id_ <= @n_trips").reset_index(drop=True)
+
     # Replace 0s in 'city_id' with NaN
-    raw.loc[raw["city_id"] == 0, "city_id"] = np.NaN
-    # Group by 'city_id' and count 'utrip_id'
-    df = raw[(raw.istest == 0) | (raw.icount > 0)].groupby("city_id")["utrip_id"].count().reset_index()
-    df.columns = ["city_id", "city_count"]
-    raw = raw.merge(df, how="left", on="city_id")
-    raw.loc[raw.city_count <= LOW_CITY_THR, "city_id"] = -1
-    raw = raw.sort_values(["utrip_id", "checkin"])
-    # Factorize categorical columns
-    CATS = ["city_id", "hotel_country", "booker_country", "device_class"]
-    MAPS = []
-    for c in CATS:
-        raw[c + "_"], mp = raw[c].factorize()
-        MAPS.append(mp)
-        print("created", c + "_")
-    # Find the index of the "low city" (-1)
-    LOW_CITY = np.where(MAPS[0] == -1)[0][0]
-    # Number of unique categories for one-hot encoding
-    NUM_CITIES = raw.city_id_.max() + 1
-    NUM_HOTELS = raw.hotel_country_.max() + 1
-    NUM_DEVICE = raw.device_class_.max() + 1
+    data.loc[data["city_id"] == 0, "city_id"] = np.NaN
+    data = _city_count_per_trip(data, low_frequency_city_threshold=9)
+
     # Reverse the data for training set
-    raw["reverse"] = 0
-    rev_raw = raw[raw.istest == 0].copy()
-    rev_raw["reverse"] = 1
-    rev_raw["utrip_id"] = rev_raw["utrip_id"] + "_r"
-    tmp = rev_raw["icount"].values.copy()
-    rev_raw["icount"] = rev_raw["dcount"]
-    rev_raw["dcount"] = tmp
-    rev_raw = rev_raw.sort_values(["utrip_id", "dcount"]).reset_index(drop=True)
-    raw = pd.concat([raw, rev_raw]).reset_index(drop=True)
-    # Add 'sorting' column
-    raw["sorting"] = np.arange(raw.shape[0])
+    data = _add_reverse_training_data(data)
 
-    # Factorize 'utrip_id'
-    raw["utrip_id" + "_"], mp = raw["utrip_id"].factorize()
+    # Factorize categorical columns
+    data, LOW_CITY, NUM_CITIES, NUM_HOTELS, NUM_DEVICE = _encode_categorical(
+        data, ["utrip_id", "city_id", "hotel_country", "booker_country", "device_class"]
+    )
 
-    # Engineer lag features
-    lag_cities = []
-    lag_countries = []
-    for i in range(1, LAGS + 1):
-        raw[f"city_id_lag{i}"] = raw.groupby("utrip_id_")["city_id_"].shift(i, fill_value=NUM_CITIES)
-        lag_cities.append(f"city_id_lag{i}")
-        raw[f"country_lag{i}"] = raw.groupby("utrip_id_")["hotel_country_"].shift(i, fill_value=NUM_HOTELS)
-        lag_countries.append(f"country_lag{i}")
+    data, lag_cities, lag_countries = _lag_cities_countries(data, NUM_CITIES, NUM_HOTELS, n_lags=LAGS)
+
     # Extract the first city and country for each trip
-    tmpD = raw[raw["dcount"] == 0][["utrip_id", "city_id_"]]
-    tmpD.columns = ["utrip_id", "first_city"]
-    raw = raw.merge(tmpD, on="utrip_id", how="left")
-    tmpD = raw[raw["dcount"] == 0][["utrip_id", "hotel_country_"]]
-    tmpD.columns = ["utrip_id", "first_country"]
-    raw = raw.merge(tmpD, on="utrip_id", how="left")
-    # Convert 'checkin' and 'checkout' columns to datetime in Pandas
-    raw["checkin"] = pd.to_datetime(raw["checkin"], format="%Y-%m-%d")
-    raw["checkout"] = pd.to_datetime(raw["checkout"], format="%Y-%m-%d")
-    # Extract month, weekday for checkin and checkout, and calculate trip length in Pandas
-    raw["mn"] = raw["checkin"].dt.month
-    raw["dy1"] = raw["checkin"].dt.weekday
-    raw["dy2"] = raw["checkout"].dt.weekday
-    raw["length"] = np.log1p((raw["checkout"] - raw["checkin"]).dt.days)
-    # Extract first checkin and last checkout for each trip in Pandas
-    tmpD = raw[raw["dcount"] == 0][["utrip_id", "checkin"]]
-    tmpD.columns = ["utrip_id", "first_checkin"]
-    raw = raw.merge(tmpD, on="utrip_id", how="left")
-    tmpD = raw[raw["icount"] == 0][["utrip_id", "checkout"]]
-    tmpD.columns = ["utrip_id", "last_checkout"]
-    raw = raw.merge(tmpD, on="utrip_id", how="left")
-    # Calculate trip length and derive last checkin and first checkout in Pandas
-    raw["trip_length"] = (raw["last_checkout"] - raw["first_checkin"]).dt.days
-    raw["trip_length"] = np.log1p(np.abs(raw["trip_length"])) * np.sign(raw["trip_length"])
-    tmpD = raw[raw["icount"] == 0][["utrip_id", "checkin"]]
-    tmpD.columns = ["utrip_id", "last_checkin"]
-    raw = raw.merge(tmpD, on="utrip_id", how="left")
-    tmpD = raw[raw["dcount"] == 0][["utrip_id", "checkout"]]
-    tmpD.columns = ["utrip_id", "first_checkout"]
-    raw = raw.merge(tmpD, on="utrip_id", how="left")
-    raw["trip_length"] = raw["trip_length"] - raw["trip_length"].mean()
-    # Engineer checkout lag and calculate lapse in Pandas
-    raw["checkout_lag1"] = raw.groupby("utrip_id_")["checkout"].shift(1, fill_value=None)
-    raw["lapse"] = (raw["checkin"] - raw["checkout_lag1"]).dt.days.fillna(-1)
-    # Engineer weekend and season features in Pandas
-    raw["day_name"] = raw["checkin"].dt.weekday
-    raw["weekend"] = raw["day_name"].isin([5, 6]).astype("int8")
-    df_season = pd.DataFrame({"mn": range(1, 13), "season": ([0] * 3) + ([1] * 3) + ([2] * 3) + ([3] * 3)})
-    raw = raw.merge(df_season, how="left", on="mn")
-    raw["N"] = raw["N"] - raw["N"].mean()
-    raw["N"] /= 3
-    raw["log_icount"] = np.log1p(raw["icount"])
-    raw["log_dcount"] = np.log1p(raw["dcount"])
+    data = _find_first_last(
+        data, first_columns=["city_id", "hotel_country"], first_names=["first_city", "first_country"]
+    )
 
-    return raw, lag_cities, lag_countries, NUM_CITIES, NUM_HOTELS, NUM_DEVICE, LOW_CITY
+    # Convert 'checkin' and 'checkout' columns to datetime in Pandas
+    data["checkin"] = pd.to_datetime(data["checkin"], format="%Y-%m-%d")
+    data["checkout"] = pd.to_datetime(data["checkout"], format="%Y-%m-%d")
+
+    # Extract first checkin and last checkout for each trip in Pandas
+    data = _find_first_last(
+        data,
+        first_columns=["checkin", "checkout"],
+        first_names=["first_checkin", "first_checkout"],
+        last_columns=["checkin", "checkout"],
+        last_names=["last_checkin", "last_checkout"],
+    )
+
+    # Extract month, weekday for checkin and checkout, and calculate trip length in Pandas
+    data["mn"] = data["checkin"].dt.month
+    data["dy1"] = data["checkin"].dt.weekday
+    data["dy2"] = data["checkout"].dt.weekday
+    data["day_name"] = data["checkin"].dt.weekday
+    data["weekend"] = data["day_name"].isin([5, 6]).astype("int8")
+    df_season = pd.DataFrame({"mn": range(1, 13), "season": ([0] * 3) + ([1] * 3) + ([2] * 3) + ([3] * 3)})
+    data = data.merge(df_season, how="left", on="mn")
+    data["length"] = np.log1p((data["checkout"] - data["checkin"]).dt.days)
+    data["trip_length"] = (data["last_checkout"] - data["first_checkin"]).dt.days
+    data["trip_length"] = np.log1p(np.abs(data["trip_length"])) * np.sign(data["trip_length"])
+    data["trip_length"] = data["trip_length"] - data["trip_length"].mean()
+
+    # Engineer checkout lag and calculate lapse in Pandas
+    data["checkout_lag1"] = data.groupby("utrip_id")["checkout"].shift(1, fill_value=None)
+    data["lapse"] = (data["checkin"] - data["checkout_lag1"]).dt.days.fillna(-1)
+    # Engineer weekend and season features in Pandas
+    data["N"] = data["N"] - data["N"].mean()
+    data["N"] /= 3
+    data["log_icount"] = np.log1p(data["icount"])
+    data["log_dcount"] = np.log1p(data["dcount"])
+
+    return data, lag_cities, lag_countries, NUM_CITIES, NUM_HOTELS, NUM_DEVICE, LOW_CITY
 
 
 def train(raw, lag_cities, lag_countries, NUM_CITIES, NUM_HOTELS, NUM_DEVICE, LOW_CITY):
     fname = "mlp"
 
     TRAIN_BATCH_SIZE = 1024
-    WORKERS = 8
     LR = 1e-3
     EPOCHS = 12
     GRADIENT_ACCUMULATION = 1
     EMBEDDING_DIM = 64
     HIDDEN_DIM = 1024
     DROPOUT_RATE = 0.2
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
-
     TRAIN_WITH_TEST = True
+
+    device = get_device()
+    print("device:", device)
 
     seed = 0
     seed_torch(seed)
@@ -154,13 +190,14 @@ def train(raw, lag_cities, lag_countries, NUM_CITIES, NUM_HOTELS, NUM_DEVICE, LO
             train,
             lag_cities=lag_cities,
             lag_countries=lag_countries,
-            target="city_id_",
+            target="city_id",
         )
 
         train_data_loader = DataLoader(
             train_dataset,
             batch_size=TRAIN_BATCH_SIZE,
             shuffle=True,
+            num_workers=8,
             pin_memory=True,
         )
 
@@ -168,13 +205,14 @@ def train(raw, lag_cities, lag_countries, NUM_CITIES, NUM_HOTELS, NUM_DEVICE, LO
             valid,
             lag_cities=lag_cities,
             lag_countries=lag_countries,
-            target="city_id_",
+            target="city_id",
         )
 
         valid_data_loader = DataLoader(
             valid_dataset,
             batch_size=TRAIN_BATCH_SIZE * 2,
             shuffle=False,
+            num_workers=8,
             pin_memory=True,
         )
 
