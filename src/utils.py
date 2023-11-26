@@ -39,8 +39,8 @@ def train_epoch(loader, model, optimizer, scheduler, device):
 def val_epoch(loader, model, device):
     model.eval()
     val_loss = []
-    LOGITS = []
-    TARGETS = []
+    logits = []
+    targets = []
 
     with torch.no_grad():
         # with tqdm_logging_redirect():
@@ -48,12 +48,12 @@ def val_epoch(loader, model, device):
             batch = {k: batch[k].to(device, non_blocking=True) for k in batch.keys()}
 
             out_dict = model(batch)
-            logits = out_dict["logits"]
+            batch_logits = out_dict["logits"]
             loss = out_dict["loss"]
             loss_np = loss.detach().cpu().numpy()
             target = batch["target"]
-            LOGITS.append(logits.detach())
-            TARGETS.append(target.detach())
+            logits.append(batch_logits.detach())
+            targets.append(target.detach())
             val_loss.append(loss_np)
 
             smooth_loss = sum(val_loss[-100:]) / min(len(val_loss), 100)
@@ -61,10 +61,10 @@ def val_epoch(loader, model, device):
 
         val_loss = np.mean(val_loss)
 
-    LOGITS = torch.cat(LOGITS).cpu().numpy()
-    TARGETS = torch.cat(TARGETS).cpu().numpy()
+    logits = torch.cat(logits).cpu().numpy()
+    targets = torch.cat(targets).cpu().numpy()
 
-    return val_loss, LOGITS, TARGETS
+    return val_loss, logits, targets
 
 
 def topk(preds, target, k=4):
@@ -94,27 +94,26 @@ def load_checkpoint(
     seed,
     device,
     fname,
-    NUM_CITIES,
-    NUM_HOTELS,
-    NUM_DEVICE,
-    LOW_CITY,
+    num_cities,
+    num_countries,
+    num_devices,
+    low_frequency_city_index,
     lag_cities,
     lag_countries,
     EMBEDDING_DIM,
     HIDDEN_DIM,
     DROPOUT_RATE,
 ):
-    model = Net(
-        NUM_CITIES + 1,
-        NUM_HOTELS + 1,
-        NUM_DEVICE,
-        LOW_CITY,
+    model = MLP(
+        num_cities + 1,
+        num_countries + 1,
+        num_devices,
+        low_frequency_city_index,
         lag_cities,
         lag_countries,
         EMBEDDING_DIM,
         HIDDEN_DIM,
         dropout_rate=DROPOUT_RATE,
-        loss=False,
     ).to(device)
 
     checkpoint = torch.load(f"./checkpoints/{fname}/{fname}_{fold}_{seed}.pt")
@@ -132,20 +131,20 @@ class BookingDataset(Dataset):
         target=None,
     ):
         super(BookingDataset, self).__init__()
-        self.lag_cities_ = data[lag_cities].values
-        self.mn = data["mn"].values - 1
-        self.dy1 = data["dy1"].values
-        self.dy2 = data["dy2"].values
-        self.length = data["length"].values
+        self.lag_cities = data[lag_cities].values
+        self.month = data["month"].values - 1
+        self.checkin_day = data["checkin_day"].values
+        self.checkout_day = data["checkout_day"].values
+        self.stay_length = data["stay_length"].values
         self.trip_length = data["trip_length"].values
-        self.N = data["N"].values
-        self.log_icount = data["log_icount"].values
-        self.log_dcount = data["log_dcount"].values
-        self.lag_countries_ = data[lag_countries].values
+        self.num_visited = data["num_visited"].values
+        self.log_inverse_order = data["log_inverse_order"].values
+        self.log_order = data["log_order"].values
+        self.lag_countries = data[lag_countries].values
         self.first_city = data["first_city"].values
         self.first_country = data["first_country"].values
-        self.booker_country_ = data["booker_country"].values
-        self.device_class_ = data["device_class"].values
+        self.booker_country = data["booker_country"].values
+        self.device_class = data["device_class"].values
         self.lapse = data["lapse"].values
         self.season = data["season"].values
         self.weekend = data["weekend"].values
@@ -155,24 +154,24 @@ class BookingDataset(Dataset):
             self.target = data[target].values
 
     def __len__(self):
-        return len(self.lag_cities_)
+        return len(self.lag_cities)
 
     def __getitem__(self, idx: int):
         input_dict = {
-            "lag_cities_": torch.tensor(self.lag_cities_[idx], dtype=torch.long),
-            "mn": torch.tensor([self.mn[idx]], dtype=torch.long),
-            "dy1": torch.tensor([self.dy1[idx]], dtype=torch.long),
-            "dy2": torch.tensor([self.dy2[idx]], dtype=torch.long),
-            "length": torch.tensor([self.length[idx]], dtype=torch.float),
+            "lag_cities": torch.tensor(self.lag_cities[idx], dtype=torch.long),
+            "month": torch.tensor([self.month[idx]], dtype=torch.long),
+            "checkin_day": torch.tensor([self.checkin_day[idx]], dtype=torch.long),
+            "checkout_day": torch.tensor([self.checkout_day[idx]], dtype=torch.long),
+            "stay_length": torch.tensor([self.stay_length[idx]], dtype=torch.float),
             "trip_length": torch.tensor([self.trip_length[idx]], dtype=torch.float),
-            "N": torch.tensor([self.N[idx]], dtype=torch.float),
-            "log_icount": torch.tensor([self.log_icount[idx]], dtype=torch.float),
-            "log_dcount": torch.tensor([self.log_dcount[idx]], dtype=torch.float),
-            "lag_countries_": torch.tensor(self.lag_countries_[idx], dtype=torch.long),
+            "num_visited": torch.tensor([self.num_visited[idx]], dtype=torch.float),
+            "log_inverse_order": torch.tensor([self.log_inverse_order[idx]], dtype=torch.float),
+            "log_order": torch.tensor([self.log_order[idx]], dtype=torch.float),
+            "lag_countries": torch.tensor(self.lag_countries[idx], dtype=torch.long),
             "first_city": torch.tensor([self.first_city[idx]], dtype=torch.long),
             "first_country": torch.tensor([self.first_country[idx]], dtype=torch.long),
-            "booker_country_": torch.tensor([self.booker_country_[idx]], dtype=torch.long),
-            "device_class_": torch.tensor([self.device_class_[idx]], dtype=torch.long),
+            "booker_country": torch.tensor([self.booker_country[idx]], dtype=torch.long),
+            "device_class": torch.tensor([self.device_class[idx]], dtype=torch.long),
             "lapse": torch.tensor([self.lapse[idx]], dtype=torch.float),
             "season": torch.tensor([self.season[idx]], dtype=torch.long),
             "weekend": torch.tensor([self.weekend[idx]], dtype=torch.long),
@@ -182,23 +181,22 @@ class BookingDataset(Dataset):
         return input_dict
 
 
-class Net(nn.Module):
+class MLP(nn.Module):
     def __init__(
         self,
         num_cities,
         num_countries,
         num_devices,
-        low_city,
+        low_frequency_city_index,
         lag_cities,
         lag_countries,
         embedding_dim,
         hidden_dim,
         dropout_rate,
-        loss=True,
     ):
-        super(Net, self).__init__()
-        self.loss = loss
-        self.low_city = low_city
+        super(MLP, self).__init__()
+        self.low_frequency_city_index = low_frequency_city_index
+        self.loss_fct = torch.nn.CrossEntropyLoss(ignore_index=self.low_frequency_city_index)
         self.dropout_rate = dropout_rate
 
         self.cities_embeddings = nn.Embedding(num_cities, embedding_dim)
@@ -209,14 +207,18 @@ class Net(nn.Module):
         self.countries_embeddings.weight.data.normal_(0.0, 0.01)
         print("country embedding data shape", self.countries_embeddings.weight.shape)
 
-        self.mn_embeddings = nn.Embedding(12, embedding_dim)
-        self.mn_embeddings.weight.data.normal_(0.0, 0.01)
+        self.devices_embeddings = nn.Embedding(num_devices, embedding_dim)
+        self.devices_embeddings.weight.data.normal_(0.0, 0.01)
+        print("device_embeddings data shape", self.devices_embeddings.weight.shape)
 
-        self.dy1_embeddings = nn.Embedding(7, embedding_dim)
-        self.dy1_embeddings.weight.data.normal_(0.0, 0.01)
+        self.month_embeddings = nn.Embedding(12, embedding_dim)
+        self.month_embeddings.weight.data.normal_(0.0, 0.01)
 
-        self.dy2_embeddings = nn.Embedding(7, embedding_dim)
-        self.dy2_embeddings.weight.data.normal_(0.0, 0.01)
+        self.checkin_day_embeddings = nn.Embedding(7, embedding_dim)
+        self.checkin_day_embeddings.weight.data.normal_(0.0, 0.01)
+
+        self.checkout_day_embeddings = nn.Embedding(7, embedding_dim)
+        self.checkout_day_embeddings.weight.data.normal_(0.0, 0.01)
 
         # self.season_embeddings = nn.Embedding(7, embedding_dim)
         # self.season_embeddings.weight.data.normal_(0., 0.01)
@@ -224,29 +226,25 @@ class Net(nn.Module):
         self.weekend_embeddings = nn.Embedding(2, embedding_dim)
         self.weekend_embeddings.weight.data.normal_(0.0, 0.01)
 
-        self.linear_length = nn.Linear(1, embedding_dim, bias=False)
-        self.norm_length = nn.BatchNorm1d(embedding_dim)
-        self.activate_length = nn.ReLU()
+        self.linear_stay_length = nn.Linear(1, embedding_dim, bias=False)
+        self.norm_stay_length = nn.BatchNorm1d(embedding_dim)
+        self.activate_stay_length = nn.ReLU()
 
         self.linear_trip_length = nn.Linear(1, embedding_dim, bias=False)
         self.norm_trip_length = nn.BatchNorm1d(embedding_dim)
         self.activate_trip_length = nn.ReLU()
 
-        self.linear_N = nn.Linear(1, embedding_dim, bias=False)
-        self.norm_N = nn.BatchNorm1d(embedding_dim)
-        self.activate_N = nn.ReLU()
+        self.linear_num_visited = nn.Linear(1, embedding_dim, bias=False)
+        self.norm_num_visited = nn.BatchNorm1d(embedding_dim)
+        self.activate_num_visited = nn.ReLU()
 
-        self.linear_log_icount = nn.Linear(1, embedding_dim, bias=False)
-        self.norm_log_icount = nn.BatchNorm1d(embedding_dim)
-        self.activate_log_icount = nn.ReLU()
+        self.linear_log_inverse_order = nn.Linear(1, embedding_dim, bias=False)
+        self.norm_log_inverse_order = nn.BatchNorm1d(embedding_dim)
+        self.activate_log_inverse_order = nn.ReLU()
 
-        self.linear_log_dcount = nn.Linear(1, embedding_dim, bias=False)
-        self.norm_log_dcount = nn.BatchNorm1d(embedding_dim)
-        self.activate_log_dcount = nn.ReLU()
-
-        self.devices_embeddings = nn.Embedding(num_devices, embedding_dim)
-        self.devices_embeddings.weight.data.normal_(0.0, 0.01)
-        print("device_embeddings data shape", self.devices_embeddings.weight.shape)
+        self.linear_log_order = nn.Linear(1, embedding_dim, bias=False)
+        self.norm_log_order = nn.BatchNorm1d(embedding_dim)
+        self.activate_log_order = nn.ReLU()
 
         self.linear_lapse = nn.Linear(1, embedding_dim, bias=False)
         self.norm_lapse = nn.BatchNorm1d(embedding_dim)
@@ -279,46 +277,48 @@ class Net(nn.Module):
         return x
 
     def forward(self, input_dict):
-        lag_embed = self.get_embed(input_dict["lag_cities_"], self.cities_embeddings)
-        lag_countries_embed = self.get_embed(input_dict["lag_countries_"], self.countries_embeddings)
-        mn_embed = self.get_embed(input_dict["mn"], self.mn_embeddings)
-        dy1_embed = self.get_embed(input_dict["dy1"], self.dy1_embeddings)
-        dy2_embed = self.get_embed(input_dict["dy2"], self.dy2_embeddings)
+        lag_cities_embeddings = self.get_embed(input_dict["lag_cities"], self.cities_embeddings)
+        lag_countries_embeddings = self.get_embed(input_dict["lag_countries"], self.countries_embeddings)
+        month_embeddings = self.get_embed(input_dict["month"], self.month_embeddings)
+        checkin_day_embeddings = self.get_embed(input_dict["checkin_day"], self.checkin_day_embeddings)
+        checkout_day_embeddings = self.get_embed(input_dict["checkout_day"], self.checkout_day_embeddings)
         # season_embed = self.get_embed(input_dict['season'], self.season_embeddings)
-        weekend_embed = self.get_embed(input_dict["weekend"], self.weekend_embeddings)
-        length = input_dict["length"]
-        length_embed = self.activate_length(self.norm_length(self.linear_length(length)))
+        weekend_embeddings = self.get_embed(input_dict["weekend"], self.weekend_embeddings)
+        stay_length = input_dict["stay_length"]
+        stay_length_embeddings = self.activate_stay_length(self.norm_stay_length(self.linear_stay_length(stay_length)))
         trip_length = input_dict["trip_length"]
-        trip_length_embed = self.activate_trip_length(self.norm_trip_length(self.linear_trip_length(trip_length)))
-        N = input_dict["N"]
-        N_embed = self.activate_N(self.norm_N(self.linear_N(N)))
+        trip_length_embeddings = self.activate_trip_length(self.norm_trip_length(self.linear_trip_length(trip_length)))
+        num_visited = input_dict["num_visited"]
+        num_visited_embeddings = self.activate_num_visited(self.norm_num_visited(self.linear_num_visited(num_visited)))
         lapse = input_dict["lapse"]
-        lapse_embed = self.activate_lapse(self.norm_lapse(self.linear_lapse(lapse)))
-        log_icount = input_dict["log_icount"]
-        log_icount_embed = self.activate_log_icount(self.norm_log_icount(self.linear_log_icount(log_icount)))
-        log_dcount = input_dict["length"]
-        log_dcount_embed = self.activate_log_dcount(self.norm_log_dcount(self.linear_log_dcount(log_dcount)))
-        first_city_embed = self.get_embed(input_dict["first_city"], self.cities_embeddings)
-        first_country_embed = self.get_embed(input_dict["first_country"], self.countries_embeddings)
-        booker_country_embed = self.get_embed(input_dict["booker_country_"], self.countries_embeddings)
-        device_embed = self.get_embed(input_dict["device_class_"], self.devices_embeddings)
-        x = (
-            mn_embed
-            + dy1_embed
-            + dy2_embed
-            + length_embed
-            + log_icount_embed
-            + log_dcount_embed
-            + first_city_embed
-            + first_country_embed
-            + booker_country_embed
-            + device_embed
-            + trip_length_embed
-            + N_embed
-            + lapse_embed
-            + weekend_embed
+        lapse_embeddings = self.activate_lapse(self.norm_lapse(self.linear_lapse(lapse)))
+        log_inverse_order = input_dict["log_inverse_order"]
+        log_inverse_order_embeddings = self.activate_log_inverse_order(
+            self.norm_log_inverse_order(self.linear_log_inverse_order(log_inverse_order))
         )
-        x = torch.cat([lag_embed, lag_countries_embed, x], -1)
+        log_order = input_dict["log_order"]
+        log_order_embeddings = self.activate_log_order(self.norm_log_order(self.linear_log_order(log_order)))
+        first_city_embeddings = self.get_embed(input_dict["first_city"], self.cities_embeddings)
+        first_country_embeddings = self.get_embed(input_dict["first_country"], self.countries_embeddings)
+        booker_country_embeddings = self.get_embed(input_dict["booker_country"], self.countries_embeddings)
+        device_embeddings = self.get_embed(input_dict["device_class"], self.devices_embeddings)
+        x = (
+            month_embeddings
+            + checkin_day_embeddings
+            + checkout_day_embeddings
+            + stay_length_embeddings
+            + log_inverse_order_embeddings
+            + log_order_embeddings
+            + first_city_embeddings
+            + first_country_embeddings
+            + booker_country_embeddings
+            + device_embeddings
+            + trip_length_embeddings
+            + num_visited_embeddings
+            + lapse_embeddings
+            + weekend_embeddings
+        )
+        x = torch.cat([lag_cities_embeddings, lag_countries_embeddings, x], -1)
         x = self.activate1(self.norm1(self.linear1(x)))
         x = self.dropout1(x)
         x = x + self.activate2(self.norm2(self.linear2(x)))
@@ -327,11 +327,12 @@ class Net(nn.Module):
         x = self.dropout3(x)
         logits = F.linear(x, self.cities_embeddings.weight, bias=self.output_layer_bias)
         output_dict = {"logits": logits}
-        if self.loss:
+
+        if "target" in input_dict.keys():
             target = input_dict["target"].squeeze(1)
-            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=self.low_city)
-            loss = loss_fct(logits, target)
+            loss = self.loss_fct(logits, target)
             output_dict["loss"] = loss
+
         return output_dict
 
 

@@ -7,14 +7,14 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
-from src.utils import train_epoch, topk, val_epoch, save_checkpoint, BookingDataset, Net, seed_torch, get_device
+from src.utils import train_epoch, topk, val_epoch, save_checkpoint, BookingDataset, MLP, seed_torch, get_device
 
 input_path = Path("../data/")
 
 
 def _city_count_per_trip(data, low_frequency_city_threshold=9):
     city_count = (
-        data.query("istest == 0 and icount > 0")  # train only and exclude last city
+        data.query("istest == 0 and inverse_order > 0")  # train only and exclude last city
         .groupby("city_id")["utrip_id"]
         .count()
         .rename("city_count")
@@ -38,10 +38,10 @@ def _encode_categorical(data, categorical_columns):
     data[categorical_columns] = categorical_values
 
     num_cities = data["city_id"].max() + 1
-    num_hotels = data["hotel_country"].max() + 1
+    num_countries = data["hotel_country"].max() + 1
     num_devices = data["device_class"].max() + 1
 
-    return data, low_frequency_city_index[0], num_cities, num_hotels, num_devices
+    return data, low_frequency_city_index[0], num_cities, num_countries, num_devices
 
 
 def _add_reverse_training_data(data):
@@ -51,8 +51,8 @@ def _add_reverse_training_data(data):
         reverse=1,
         utrip_id=reverse_training_data["utrip_id"] + "_r",
     )
-    reverse_training_data[["icount", "dcount"]] = reverse_training_data[["dcount", "icount"]]
-    reverse_training_data = reverse_training_data.sort_values(["utrip_id", "dcount"], ignore_index=True)
+    reverse_training_data[["inverse_order", "order"]] = reverse_training_data[["order", "inverse_order"]]
+    reverse_training_data = reverse_training_data.sort_values(["utrip_id", "order"], ignore_index=True)
     data = pd.concat([data, reverse_training_data], ignore_index=True)
 
     data["sorting"] = np.arange(data.shape[0])
@@ -60,12 +60,12 @@ def _add_reverse_training_data(data):
     return data
 
 
-def _lag_cities_countries(data, NUM_CITIES, NUM_HOTELS, n_lags=5):
-    lag_cities = data.groupby("utrip_id")["city_id"].shift(range(1, n_lags + 1), fill_value=NUM_CITIES)
+def _lag_cities_countries(data, num_cities, num_countries, n_lags=5):
+    lag_cities = data.groupby("utrip_id")["city_id"].shift(range(1, n_lags + 1), fill_value=num_cities)
     lag_cities_columns = [f"city_id_lag{i}" for i in range(1, n_lags + 1)]
     lag_cities.columns = lag_cities_columns
 
-    lag_countries = data.groupby("utrip_id")["hotel_country"].shift(range(1, n_lags + 1), fill_value=NUM_HOTELS)
+    lag_countries = data.groupby("utrip_id")["hotel_country"].shift(range(1, n_lags + 1), fill_value=num_countries)
     lag_countries_columns = [f"hotel_id_lag{i}" for i in range(1, n_lags + 1)]
     lag_countries.columns = lag_countries_columns
 
@@ -76,12 +76,12 @@ def _lag_cities_countries(data, NUM_CITIES, NUM_HOTELS, n_lags=5):
 
 def _find_first_last(data, first_columns=None, last_columns=None, first_names=None, last_names=None):
     if first_columns is not None:
-        first = data.query("dcount == 0")[["utrip_id"] + first_columns]
+        first = data.query("order == 0")[["utrip_id"] + first_columns]
         first.columns = ["utrip_id"] + first_names
         data = data.merge(first, on="utrip_id", how="left")
 
     if last_columns is not None:
-        last = data.query("icount == 0")[["utrip_id"] + last_columns]
+        last = data.query("inverse_order == 0")[["utrip_id"] + last_columns]
         last.columns = ["utrip_id"] + last_names
         data = data.merge(last, on="utrip_id", how="left")
 
@@ -89,8 +89,6 @@ def _find_first_last(data, first_columns=None, last_columns=None, first_names=No
 
 
 def load_data(n_trips=None):
-    LAGS = 5
-
     data = pd.read_csv(input_path / "train_and_test_2.csv")
     if n_trips:
         data = data.query("utrip_id_ <= @n_trips").reset_index(drop=True)
@@ -103,11 +101,11 @@ def load_data(n_trips=None):
     data = _add_reverse_training_data(data)
 
     # Factorize categorical columns
-    data, LOW_CITY, NUM_CITIES, NUM_HOTELS, NUM_DEVICE = _encode_categorical(
+    data, low_frequency_city_index, num_cities, num_countries, num_devices = _encode_categorical(
         data, ["utrip_id", "city_id", "hotel_country", "booker_country", "device_class"]
     )
 
-    data, lag_cities, lag_countries = _lag_cities_countries(data, NUM_CITIES, NUM_HOTELS, n_lags=LAGS)
+    data, lag_cities, lag_countries = _lag_cities_countries(data, num_cities, num_countries, n_lags=5)
 
     # Extract the first city and country for each trip
     data = _find_first_last(
@@ -128,14 +126,13 @@ def load_data(n_trips=None):
     )
 
     # Extract month, weekday for checkin and checkout, and calculate trip length in Pandas
-    data["mn"] = data["checkin"].dt.month
-    data["dy1"] = data["checkin"].dt.weekday
-    data["dy2"] = data["checkout"].dt.weekday
-    data["day_name"] = data["checkin"].dt.weekday
-    data["weekend"] = data["day_name"].isin([5, 6]).astype("int8")
-    df_season = pd.DataFrame({"mn": range(1, 13), "season": ([0] * 3) + ([1] * 3) + ([2] * 3) + ([3] * 3)})
-    data = data.merge(df_season, how="left", on="mn")
-    data["length"] = np.log1p((data["checkout"] - data["checkin"]).dt.days)
+    data["month"] = data["checkin"].dt.month
+    data["checkin_day"] = data["checkin"].dt.weekday
+    data["checkout_day"] = data["checkout"].dt.weekday
+    data["weekend"] = data["checkin"].dt.weekday.isin([5, 6]).astype("int8")
+    df_season = pd.DataFrame({"month": range(1, 13), "season": ([0] * 3) + ([1] * 3) + ([2] * 3) + ([3] * 3)})
+    data = data.merge(df_season, how="left", on="month")
+    data["stay_length"] = np.log1p((data["checkout"] - data["checkin"]).dt.days)
     data["trip_length"] = (data["last_checkout"] - data["first_checkin"]).dt.days
     data["trip_length"] = np.log1p(np.abs(data["trip_length"])) * np.sign(data["trip_length"])
     data["trip_length"] = data["trip_length"] - data["trip_length"].mean()
@@ -144,15 +141,15 @@ def load_data(n_trips=None):
     data["checkout_lag1"] = data.groupby("utrip_id")["checkout"].shift(1, fill_value=None)
     data["lapse"] = (data["checkin"] - data["checkout_lag1"]).dt.days.fillna(-1)
     # Engineer weekend and season features in Pandas
-    data["N"] = data["N"] - data["N"].mean()
-    data["N"] /= 3
-    data["log_icount"] = np.log1p(data["icount"])
-    data["log_dcount"] = np.log1p(data["dcount"])
+    data["num_visited"] = data["num_visited"] - data["num_visited"].mean()
+    data["num_visited"] /= 3
+    data["log_inverse_order"] = np.log1p(data["inverse_order"])
+    data["log_order"] = np.log1p(data["order"])
 
-    return data, lag_cities, lag_countries, NUM_CITIES, NUM_HOTELS, NUM_DEVICE, LOW_CITY
+    return data, lag_cities, lag_countries, num_cities, num_countries, num_devices, low_frequency_city_index
 
 
-def train(raw, lag_cities, lag_countries, NUM_CITIES, NUM_HOTELS, NUM_DEVICE, LOW_CITY):
+def train(data, lag_cities, lag_countries, num_cities, num_countries, num_devices, low_frequency_city_index):
     fname = "mlp"
 
     TRAIN_BATCH_SIZE = 1024
@@ -177,13 +174,16 @@ def train(raw, lag_cities, lag_countries, NUM_CITIES, NUM_HOTELS, NUM_DEVICE, LO
         preds_fold = []
         print("#" * 25)
         print(f"### FOLD {fold}")
+
+        train_indices = (data.fold != fold) & (data.order > 0) & (data.istest == 0)  # why order > 0?
+        val_indicices = (data.fold == fold) & (data.istest == 0) & (data.inverse_order == 0) & (data.reverse == 0)
+        test_indices = (data.istest == 1) & (data.inverse_order > 0)
+
         if TRAIN_WITH_TEST:
-            train = raw.loc[
-                (raw.fold != fold) & (raw.dcount > 0) & (raw.istest == 0) | ((raw.istest == 1) & (raw.icount > 0))
-            ].copy()
+            train = data.loc[train_indices | test_indices].copy()
         else:
-            train = raw.loc[(raw.fold != fold) & (raw.dcount > 0) & (raw.istest == 0)].copy()
-        valid = raw.loc[(raw.fold == fold) & (raw.istest == 0) & (raw.icount == 0) & (raw.reverse == 0)].copy()
+            train = data.loc[train_indices].copy()
+        valid = data.loc[val_indicices].copy()
         print(train.shape, valid.shape)
 
         train_dataset = BookingDataset(
@@ -216,11 +216,11 @@ def train(raw, lag_cities, lag_countries, NUM_CITIES, NUM_HOTELS, NUM_DEVICE, LO
             pin_memory=True,
         )
 
-        model = Net(
-            NUM_CITIES + 1,
-            NUM_HOTELS + 1,
-            NUM_DEVICE,
-            LOW_CITY,
+        model = MLP(
+            num_cities + 1,
+            num_countries + 1,
+            num_devices,
+            low_frequency_city_index,
             lag_cities,
             lag_countries,
             EMBEDDING_DIM,
@@ -243,25 +243,27 @@ def train(raw, lag_cities, lag_countries, NUM_CITIES, NUM_HOTELS, NUM_DEVICE, LO
         for epoch in range(EPOCHS):
             print(time.ctime(), "Epoch:", epoch)
             train_loss = train_epoch(train_data_loader, model, optimizer, scheduler, device)
-            val_loss, PREDS, TARGETS = val_epoch(valid_data_loader, model, device)
-            PREDS[:, LOW_CITY] = -1e10  # remove low frequency cities
-            score = topk(PREDS, TARGETS)
+            val_loss, pred, true = val_epoch(valid_data_loader, model, device)
+            pred[:, low_frequency_city_index] = -1e10  # remove low frequency cities
+            score = topk(pred, true)
 
             print(
                 f"""
-                Fold {fold} 
-                Seed {seed} 
-                Ep {epoch} 
-                lr {optimizer.param_groups[0]["lr"]:.7f} 
-                train loss {np.mean(train_loss):4f} 
-                val loss {np.mean(val_loss):4f} 
-                score {score:4f}""",
+            ############# Epoch {epoch} result #############
+            # Fold {fold}
+            # Seed {seed}
+            # Learning Rate: {optimizer.param_groups[0]["lr"]:.7f}
+            # Train Loss: {np.mean(train_loss):.4f}
+            # Validation Loss: {np.mean(val_loss):.4f}
+            # Score: {score:.4f}
+            #################################################
+            """,
                 flush=True,
             )
             if score > best_score:
                 best_score = score
                 best_epoch = epoch
-                preds_fold = PREDS
+                preds_fold = pred
                 save_checkpoint(model, optimizer, scheduler, epoch, best_score, fold, seed, fname)
         del model, scheduler, optimizer, valid_data_loader, valid_dataset, train_data_loader, train_dataset
         gc.collect()
@@ -278,5 +280,5 @@ def train(raw, lag_cities, lag_countries, NUM_CITIES, NUM_HOTELS, NUM_DEVICE, LO
 
 
 if __name__ == "__main__":
-    raw, lag_cities, lag_countries, NUM_CITIES, NUM_HOTELS, NUM_DEVICE, LOW_CITY = load_data()
-    train(raw, lag_cities, lag_countries, NUM_CITIES, NUM_HOTELS, NUM_DEVICE, LOW_CITY)
+    data, lag_cities, lag_countries, num_cities, num_countries, num_devices, low_frequency_city_index = load_data()
+    train(data, lag_cities, lag_countries, num_cities, num_countries, num_devices, low_frequency_city_index)
