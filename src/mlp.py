@@ -7,7 +7,10 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
-from src.utils import train_epoch, topk, val_epoch, save_checkpoint, BookingDataset, MLP, seed_torch, get_device
+from src.models import MLPSMF
+from src.utils import train_epoch, val_epoch, save_checkpoint, seed_torch, get_device
+from src.metrics import topk
+from src.data import BookingDataset
 
 input_path = Path("../data/")
 
@@ -160,8 +163,10 @@ def train(data, lag_cities, lag_countries, num_cities, num_countries, num_device
     HIDDEN_DIM = 1024
     DROPOUT_RATE = 0.2
     TRAIN_WITH_TEST = True
+    NUM_WORKERS = 8
 
     device = get_device()
+    # device = "cpu"
     print("device:", device)
 
     seed = 0
@@ -197,7 +202,7 @@ def train(data, lag_cities, lag_countries, num_cities, num_countries, num_device
             train_dataset,
             batch_size=TRAIN_BATCH_SIZE,
             shuffle=True,
-            num_workers=8,
+            num_workers=NUM_WORKERS,
             pin_memory=True,
         )
 
@@ -212,20 +217,19 @@ def train(data, lag_cities, lag_countries, num_cities, num_countries, num_device
             valid_dataset,
             batch_size=TRAIN_BATCH_SIZE * 2,
             shuffle=False,
-            num_workers=8,
+            num_workers=NUM_WORKERS,
             pin_memory=True,
         )
 
-        model = MLP(
+        model = MLPSMF(
             num_cities + 1,
             num_countries + 1,
             num_devices,
+            5,
             low_frequency_city_index,
-            lag_cities,
-            lag_countries,
             EMBEDDING_DIM,
             HIDDEN_DIM,
-            dropout_rate=DROPOUT_RATE,
+            dropout=DROPOUT_RATE,
         ).to(device)
 
         optimizer = torch.optim.Adam(model.parameters(), lr=LR)
