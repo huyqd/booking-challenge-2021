@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 
 from src.models import MLPSMF
 from src.utils import train_epoch, val_epoch, save_checkpoint, seed_torch, get_device
-from src.metrics import topk
+from src.metrics import hr_score, ndcg_score
 from src.data import BookingDataset
 
 input_path = Path("../data/")
@@ -94,7 +94,8 @@ def _find_first_last(data, first_columns=None, last_columns=None, first_names=No
 def load_data(n_trips=None):
     data = pd.read_csv(input_path / "train_and_test_2.csv")
     if n_trips:
-        data = data.query("utrip_id_ <= @n_trips").reset_index(drop=True)
+        selected = np.random.choice(data["utrip_id"].unique(), n_trips, replace=False)
+        data = data.query("utrip_id in @selected").reset_index(drop=True)
 
     # Replace 0s in 'city_id' with NaN
     data.loc[data["city_id"] == 0, "city_id"] = np.NaN
@@ -164,6 +165,7 @@ def train(data, lag_cities, lag_countries, num_cities, num_countries, num_device
     DROPOUT_RATE = 0.2
     TRAIN_WITH_TEST = True
     NUM_WORKERS = 8
+    NUM_WORKERS = 1
 
     device = get_device()
     # device = "cpu"
@@ -249,7 +251,8 @@ def train(data, lag_cities, lag_countries, num_cities, num_countries, num_device
             train_loss = train_epoch(train_data_loader, model, optimizer, scheduler, device)
             val_loss, pred, true = val_epoch(valid_data_loader, model, device)
             pred[:, low_frequency_city_index] = -1e10  # remove low frequency cities
-            score = topk(pred, true)
+            hr = hr_score(true, pred)
+            ndcg = ndcg_score(true, pred)
 
             print(
                 f"""
@@ -259,13 +262,14 @@ def train(data, lag_cities, lag_countries, num_cities, num_countries, num_device
             # Learning Rate: {optimizer.param_groups[0]["lr"]:.7f}
             # Train Loss: {np.mean(train_loss):.4f}
             # Validation Loss: {np.mean(val_loss):.4f}
-            # Score: {score:.4f}
+            # HR Score: {hr:.4f}
+            # NDCG Score: {ndcg:.4f}
             #################################################
             """,
                 flush=True,
             )
-            if score > best_score:
-                best_score = score
+            if ndcg > best_score:
+                best_score = ndcg
                 best_epoch = epoch
                 preds_fold = pred
                 save_checkpoint(model, optimizer, scheduler, epoch, best_score, fold, seed, fname)
