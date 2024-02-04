@@ -7,8 +7,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from src.metrics import hr_score, ndcg_score
-from src.mlp.data import BookingData
-from src.mlp.model import MLPSMF
+from src.gru.data import BookingData
+from src.gru.model import MSGRUSMF
 from src.utils import train_epoch, val_epoch, save_checkpoint, seed_torch, get_device
 
 input_path = Path("../../data/")
@@ -16,9 +16,9 @@ input_path = Path("../../data/")
 
 def train():
     data = BookingData()
-    fname = "mlp"
+    fname = "GRU"
 
-    TRAIN_BATCH_SIZE = 1024
+    TRAIN_BATCH_SIZE = 512
     LR = 1e-3
     EPOCHS = 12
     GRADIENT_ACCUMULATION = 1
