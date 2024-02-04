@@ -3,93 +3,86 @@ from torch import nn as nn
 from torch.nn import functional as F
 
 
-class MLPSMF(nn.Module):
+class MSGRUSMF(nn.Module):
     def __init__(
         self,
         num_cities,
-        num_countries,
+        num_hotel_countries,
+        num_booker_countries,
         num_devices,
-        num_lags,
+        trip_length,
+        stay_length,
+        lapse,
+        num_affiliates,
+        num_order,
+        num_inverse_order,
         loss_ignore_index,
         embedding_dim,
-        hidden_dim,
+        num_lags,
         dropout,
     ):
         super().__init__()
-        self.cities_embeddings = nn.Embedding(num_cities, embedding_dim)
+        self.cities_embeddings = nn.Embedding(num_cities, 400)
         self.cities_embeddings.weight.data.normal_(0.0, 0.01)
 
-        self.countries_embeddings = nn.Embedding(num_countries, embedding_dim)
-        self.countries_embeddings.weight.data.normal_(0.0, 0.01)
+        self.hotel_country_embedding = nn.Embedding(num_hotel_countries, 14)
+        self.hotel_country_embedding.weight.data.normal_(0.0, 0.01)
 
-        self.devices_embeddings = nn.Embedding(num_devices, embedding_dim)
+        self.booker_country_embedding = nn.Embedding(num_booker_countries, 3)
+        self.booker_country_embedding.weight.data.normal_(0.0, 0.01)
+
+        self.devices_embeddings = nn.Embedding(num_devices, 2)
         self.devices_embeddings.weight.data.normal_(0.0, 0.01)
 
-        self.month_embeddings = nn.Embedding(12, embedding_dim)
+        self.first_city_embeddings = nn.Embedding(num_cities, 200)
+        self.first_city_embeddings.weight.data.normal_(0.0, 0.01)
+
+        self.affiliate_id_embeddings = nn.Embedding(num_affiliates, 60)
+        self.affiliate_id_embeddings.weight.data.normal_(0.0, 0.01)
+
+        self.month_embeddings = nn.Embedding(12, 4)
         self.month_embeddings.weight.data.normal_(0.0, 0.01)
 
-        self.checkin_day_embeddings = nn.Embedding(7, embedding_dim)
+        self.checkin_day_embeddings = nn.Embedding(7, 3)
         self.checkin_day_embeddings.weight.data.normal_(0.0, 0.01)
 
-        self.checkout_day_embeddings = nn.Embedding(7, embedding_dim)
+        self.checkout_day_embeddings = nn.Embedding(7, 3)
         self.checkout_day_embeddings.weight.data.normal_(0.0, 0.01)
 
-        self.weekend_embeddings = nn.Embedding(2, embedding_dim)
+        self.weekend_embeddings = nn.Embedding(2, 3)
         self.weekend_embeddings.weight.data.normal_(0.0, 0.01)
 
-        self.stay_length_embeddings = nn.Sequential(
-            nn.Linear(1, embedding_dim),
-            nn.BatchNorm1d(embedding_dim),
-            nn.ReLU(),
-            nn.Unflatten(1, (1, embedding_dim)),
+        self.trip_length_embeddings = nn.Embedding(trip_length, 18)
+        self.trip_length_embeddings.weight.data.normal_(0.0, 0.01)
+
+        self.stay_length_embeddings = nn.Embedding(stay_length, 6)
+        self.stay_length_embeddings.weight.data.normal_(0.0, 0.01)
+
+        self.lapse_embeddings = nn.Embedding(lapse, 9)
+        self.lapse_embeddings.weight.data.normal_(0.0, 0.01)
+
+        self.num_order_embeddings = nn.Embedding(num_order, 7)
+        self.num_order_embeddings.weight.data.normal_(0.0, 0.01)
+
+        self.num_inverse_order_embeddings = nn.Embedding(num_inverse_order, 7)
+        self.num_inverse_order_embeddings.weight.data.normal_(0.0, 0.01)
+
+        self.gru = nn.GRU(
+            input_size=num_lags * embedding_dim,
+            hidden_size=embedding_dim,
+            num_layers=1,
+            batch_first=True,
+            dropout=dropout,
         )
 
-        self.trip_length_embeddings = nn.Sequential(
-            nn.Linear(1, embedding_dim),
-            nn.BatchNorm1d(embedding_dim),
+        self.fc1 = nn.Sequential(
+            nn.Linear(739, 768),
             nn.ReLU(),
-            nn.Unflatten(1, (1, embedding_dim)),
-        )
-
-        self.num_visited_embeddings = nn.Sequential(
-            nn.Linear(1, embedding_dim),
-            nn.BatchNorm1d(embedding_dim),
-            nn.ReLU(),
-            nn.Unflatten(1, (1, embedding_dim)),
-        )
-
-        self.log_order_embeddings = nn.Sequential(
-            nn.Linear(1, embedding_dim),
-            nn.BatchNorm1d(embedding_dim),
-            nn.ReLU(),
-            nn.Unflatten(1, (1, embedding_dim)),
-        )
-
-        self.log_inverse_order_embeddings = nn.Sequential(
-            nn.Linear(1, embedding_dim),
-            nn.BatchNorm1d(embedding_dim),
-            nn.ReLU(),
-            nn.Unflatten(1, (1, embedding_dim)),
-        )
-
-        self.lapse_embeddings = nn.Sequential(
-            nn.Linear(1, embedding_dim),
-            nn.BatchNorm1d(embedding_dim),
-            nn.ReLU(),
-            nn.Unflatten(1, (1, embedding_dim)),
-        )
-        self.fc = nn.Sequential(
-            nn.Linear(embedding_dim * (num_lags * 2 + 1), hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.PReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.PReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, embedding_dim),
-            nn.BatchNorm1d(embedding_dim),
-            nn.PReLU(),
+        )
+        self.fc2 = nn.Sequential(
+            nn.Linear(768, 768),
+            nn.ReLU(),
             nn.Dropout(dropout),
         )
         self.output_layer_bias = nn.Parameter(torch.Tensor(num_cities))
@@ -98,7 +91,7 @@ class MLPSMF(nn.Module):
 
     def forward(self, batch):
         lag_cities_embedding = self.cities_embeddings(batch["lag_cities"])
-        lag_countries_embedding = self.countries_embeddings(batch["lag_countries"])
+        lag_countries_embedding = self.hotel_country_embedding(batch["lag_countries"])
         devices_embedding = self.devices_embeddings(batch["device_class"])
         month_embedding = self.month_embeddings(batch["month"])
         checkin_day_embedding = self.checkin_day_embeddings(batch["checkin_day"])
@@ -111,8 +104,8 @@ class MLPSMF(nn.Module):
         log_inverse_order_embedding = self.log_inverse_order_embeddings(batch["log_inverse_order"])
         lapse_embedding = self.lapse_embeddings(batch["lapse"])
         first_city_embedding = self.cities_embeddings(batch["first_city"])
-        first_country_embedding = self.countries_embeddings(batch["first_country"])
-        booker_country_embedding = self.countries_embeddings(batch["booker_country"])
+        first_country_embedding = self.hotel_country_embedding(batch["first_country"])
+        booker_country_embedding = self.hotel_country_embedding(batch["booker_country"])
 
         sum_embeddings = torch.sum(
             torch.cat(

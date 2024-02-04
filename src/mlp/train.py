@@ -1,6 +1,5 @@
 import gc
 import time
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -10,8 +9,6 @@ from src.metrics import hr_score, ndcg_score
 from src.mlp.data import BookingData
 from src.mlp.model import MLPSMF
 from src.utils import train_epoch, val_epoch, save_checkpoint, seed_torch, get_device
-
-input_path = Path("../../data/")
 
 
 def train():

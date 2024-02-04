@@ -1,10 +1,11 @@
-import numpy as np
+from pathlib import Path
+
 import pandas as pd
 import polars as pl
 import torch
 from torch.utils.data import Dataset
 
-from src.mlp.train import input_path
+input_path = Path("../../data/")
 
 
 class BookingDataset(Dataset):
@@ -12,27 +13,26 @@ class BookingDataset(Dataset):
         self,
         data,
         lag_cities,
-        lag_countries,
         target=None,
     ):
         super(BookingDataset, self).__init__()
         self.lag_cities = data[lag_cities].to_numpy()
-        self.month = data["month"].to_numpy() - 1
+        self.month = data["month"].to_numpy()
         self.checkin_day = data["checkin_day"].to_numpy()
         self.checkout_day = data["checkout_day"].to_numpy()
         self.stay_length = data["stay_length"].to_numpy()
         self.trip_length = data["trip_length"].to_numpy()
-        self.num_visited = data["num_visited"].to_numpy()
-        self.log_inverse_order = data["log_inverse_order"].to_numpy()
-        self.log_order = data["log_order"].to_numpy()
-        self.lag_countries = data[lag_countries].to_numpy()
-        self.first_city = data["first_city"].to_numpy()
-        self.first_country = data["first_country"].to_numpy()
-        self.booker_country = data["booker_country"].to_numpy()
-        self.device_class = data["device_class"].to_numpy()
         self.lapse = data["lapse"].to_numpy()
         self.season = data["season"].to_numpy()
         self.weekend = data["weekend"].to_numpy()
+        self.country_lag_1 = data["country_lag_1"].to_numpy()
+        self.first_city = data["first_city"].to_numpy()
+        self.booker_country = data["booker_country"].to_numpy()
+        self.device_class = data["device_class"].to_numpy()
+        self.affiliate_id = data["affiliate_id"].to_numpy()
+        self.order = data["order"].to_numpy()
+        self.inverse_order = data["inverse_order"].to_numpy()
+
         if target is None:
             self.target = None
         else:
@@ -49,17 +49,16 @@ class BookingDataset(Dataset):
             "checkout_day": torch.tensor([self.checkout_day[idx]], dtype=torch.long),
             "stay_length": torch.tensor([self.stay_length[idx]], dtype=torch.float),
             "trip_length": torch.tensor([self.trip_length[idx]], dtype=torch.float),
-            "num_visited": torch.tensor([self.num_visited[idx]], dtype=torch.float),
-            "log_inverse_order": torch.tensor([self.log_inverse_order[idx]], dtype=torch.float),
-            "log_order": torch.tensor([self.log_order[idx]], dtype=torch.float),
-            "lag_countries": torch.tensor(self.lag_countries[idx], dtype=torch.long),
-            "first_city": torch.tensor([self.first_city[idx]], dtype=torch.long),
-            "first_country": torch.tensor([self.first_country[idx]], dtype=torch.long),
-            "booker_country": torch.tensor([self.booker_country[idx]], dtype=torch.long),
-            "device_class": torch.tensor([self.device_class[idx]], dtype=torch.long),
             "lapse": torch.tensor([self.lapse[idx]], dtype=torch.float),
             "season": torch.tensor([self.season[idx]], dtype=torch.long),
             "weekend": torch.tensor([self.weekend[idx]], dtype=torch.long),
+            "country_lag_1": torch.tensor([self.country_lag_1[idx]], dtype=torch.long),
+            "first_city": torch.tensor([self.first_city[idx]], dtype=torch.long),
+            "booker_country": torch.tensor([self.booker_country[idx]], dtype=torch.long),
+            "device_class": torch.tensor([self.device_class[idx]], dtype=torch.long),
+            "affiliate_id": torch.tensor([self.affiliate_id[idx]], dtype=torch.long),
+            "order": torch.tensor([self.order[idx]], dtype=torch.float),
+            "inverse_order": torch.tensor([self.inverse_order[idx]], dtype=torch.float),
         }
         if self.target is not None:
             input_dict["target"] = torch.tensor([self.target[idx]], dtype=torch.long)
@@ -105,29 +104,31 @@ class BookingData:
 
         data = pl.concat([data.with_columns(pl.lit(0).alias("reverse")), reverse_data], how="vertical")
         data = data.with_row_index(name="sorting")
-        categorical_values = data.select(
-            pl.col(["utrip_id", "city_id", "hotel_country", "booker_country", "device_class"]).map_batches(
-                lambda x: pd.factorize(x.to_numpy())[0]
-            )
+        data = data.with_columns(
+            pl.col(
+                [
+                    "utrip_id",
+                    "city_id",
+                    "hotel_country",
+                    "booker_country",
+                    "device_class",
+                    "affiliate_id",
+                ]
+            ).map_batches(lambda x: pd.factorize(x.to_numpy())[0])
         )
 
-        self.low_frequency_city_index = categorical_values["city_id"].filter(data["city_id"].eq(-1)).unique()[0]
-        data[["utrip_id", "city_id", "hotel_country", "booker_country", "device_class"]] = categorical_values
         self.num_cities = data["city_id"].max() + 1
         self.num_countries = data["hotel_country"].max() + 1
         self.num_devices = data["device_class"].max() + 1
+
         data = data.sort(by=["utrip_id", "order"], descending=False)
         city_lags = [
-            pl.col("city_id").shift(n, fill_value=self.num_cities).over("utrip_id").alias(f"city_id_lag_{n}")
+            pl.col("city_id").shift(n, fill_value=-1).over("utrip_id").alias(f"city_id_lag_{n}")
             for n in range(1, self.NUM_LAGS + 1)
         ]
-        country_lags = [
-            pl.col("hotel_country").shift(n, fill_value=self.num_countries).over("utrip_id").alias(f"country_lag_{n}")
-            for n in range(1, self.NUM_LAGS + 1)
-        ]
+        country_lag_1 = pl.col("hotel_country").shift(1, fill_value=-1).over("utrip_id").alias(f"country_lag_1")
 
         first_city = pl.first("city_id").over("utrip_id").alias("first_city")
-        first_country = pl.first("hotel_country").over("utrip_id").alias("first_country")
 
         checkin_col = pl.col("checkin").str.to_date()
         checkout_col = pl.col("checkout").str.to_date()
@@ -136,43 +137,28 @@ class BookingData:
         checkout_day = checkout_col.dt.weekday().sub(1).alias("checkout_day")
         weekend = checkin_day.is_in([5, 6]).alias("weekend")
         season = (month // 3).alias("season")
-        stay_length = np.log1p((checkout_col - checkin_col).dt.total_days().alias("stay_length"))
+        stay_length = (checkout_col - checkin_col).dt.total_days().alias("stay_length")
 
         first_checkin = checkin_col.first().over("utrip_id").alias("first_checkin")
-        first_checkout = checkout_col.first().over("utrip_id").alias("first_checkout")
-        last_checkin = checkin_col.last().over("utrip_id").alias("last_checkin")
         last_checkout = checkout_col.last().over("utrip_id").alias("last_checkout")
         trip_length = (last_checkout - first_checkin).dt.total_days().alias("trip_length")
-        trip_length = np.log1p(np.abs(trip_length)) * np.sign(trip_length)
-        trip_length = trip_length.sub(trip_length.mean())
 
         checkout_lag1 = checkout_col.shift(1, fill_value=None).over("utrip_id").alias("checkout_lag1")
         lapse = (checkin_col - checkout_lag1).dt.total_days().fill_null(-1).alias("lapse")
 
-        num_visited = (pl.col("num_visited") - pl.col("num_visited").mean()) / 3
-        log_order = np.log1p(pl.col("order").alias("log_order"))
-        log_inverse_order = np.log1p(pl.col("inverse_order").alias("log_inverse_order"))
         data = data.with_columns(
             city_lags
-            + country_lags
             + [
+                country_lag_1,
                 first_city,
-                first_country,
                 checkin_day,
                 checkout_day,
-                lapse,
-                stay_length,
-                trip_length,
                 weekend,
                 month,
                 season,
-                first_checkin,
-                first_checkout,
-                last_checkin,
-                last_checkout,
-                num_visited,
-                log_order,
-                log_inverse_order,
+                stay_length,
+                trip_length,
+                lapse,
             ]
         )
 
@@ -188,7 +174,6 @@ class BookingData:
         return BookingDataset(
             train,
             lag_cities=[f"city_id_lag_{n}" for n in range(1, self.NUM_LAGS + 1)],
-            lag_countries=[f"country_lag_{n}" for n in range(1, self.NUM_LAGS + 1)],
             target="city_id",
         )
 
@@ -205,6 +190,5 @@ class BookingData:
         return BookingDataset(
             valid,
             lag_cities=[f"city_id_lag_{n}" for n in range(1, self.NUM_LAGS + 1)],
-            lag_countries=[f"country_lag_{n}" for n in range(1, self.NUM_LAGS + 1)],
             target="city_id",
         )

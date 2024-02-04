@@ -1,10 +1,12 @@
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import polars as pl
 import torch
 from torch.utils.data import Dataset
 
-from src.mlp.train import input_path
+input_path = Path("../../data/")
 
 
 class BookingDataset(Dataset):
@@ -17,7 +19,7 @@ class BookingDataset(Dataset):
     ):
         super(BookingDataset, self).__init__()
         self.lag_cities = data[lag_cities].to_numpy()
-        self.month = data["month"].to_numpy() - 1
+        self.month = data["month"].to_numpy()
         self.checkin_day = data["checkin_day"].to_numpy()
         self.checkout_day = data["checkout_day"].to_numpy()
         self.stay_length = data["stay_length"].to_numpy()
@@ -113,9 +115,11 @@ class BookingData:
 
         self.low_frequency_city_index = categorical_values["city_id"].filter(data["city_id"].eq(-1)).unique()[0]
         data[["utrip_id", "city_id", "hotel_country", "booker_country", "device_class"]] = categorical_values
+
         self.num_cities = data["city_id"].max() + 1
         self.num_countries = data["hotel_country"].max() + 1
         self.num_devices = data["device_class"].max() + 1
+
         data = data.sort(by=["utrip_id", "order"], descending=False)
         city_lags = [
             pl.col("city_id").shift(n, fill_value=self.num_cities).over("utrip_id").alias(f"city_id_lag_{n}")
